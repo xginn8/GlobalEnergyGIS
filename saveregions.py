@@ -1,15 +1,15 @@
 import os
-from collections import defaultdict, namedtuple
+from collections import defaultdict
 from typing import Generic, List, Tuple, TypeVar
 
 import h5py
+import hdf5plugin
 
 # import jld2
 import numpy as np
 import pandas as pd
 import toml
 from osgeo import gdal
-from scipy.io import loadmat
 from tqdm import tqdm
 
 T = TypeVar("T")
@@ -139,6 +139,7 @@ def dataindexes_lat(latdata: List[bool], padding: int = 0):
 
 def dataindexes_lon(londata: List[bool], padding: int = 0):
     len_londata = len(londata)
+    breakpoint()
     seq = longest_circular_sequence(londata, False)
     first, last = seq[1] + 1, seq[0] - 1
     last = last if last >= first else last + len_londata
@@ -165,10 +166,10 @@ def in_datafolder(*names):
 
 
 def splitregiondefinitions(regiondefinitionarray):
-    regionnames = regiondefinitionarray[:, 0]
+    regionnames = [x[0] for x in regiondefinitionarray]
     regiondefinitions = [
         (regdef,) if not isinstance(regdef, tuple) else regdef
-        for regdef in regiondefinitionarray[:, 1]
+        for regdef in regiondefinitionarray
     ]
     nutsdef = [
         tuple(rd for rd in regdef if isinstance(rd, NUTS))
@@ -178,6 +179,7 @@ def splitregiondefinitions(regiondefinitionarray):
         tuple(rd for rd in regdef if isinstance(rd, GADM))
         for regdef in regiondefinitions
     ]
+    breakpoint()
     return regionnames, nutsdef, gadmdef
 
 
@@ -193,14 +195,14 @@ def makeregions_nuts(region, nuts, subregionnames, regiondefinitions):
     updateprogress = tqdm(total=cols)
     for c in np.random.permutation(cols):
         for r in range(rows):
-            nuts_id = nuts[r, c]
-            if nuts_id == 0 or region[r, c] > 0:
+            nuts_id = nuts[r][c]
+            if nuts_id == 0 or region[r][c] > 0:
                 continue
             reg = subregionnames[nuts_id]
             while len(reg) >= 2:
                 regid = regionlookup.get(reg, 0)
                 if regid > 0:
-                    region[r, c] = regid
+                    region[r][c] = regid
                     break
                 reg = reg[:-1]
         updateprogress.update(1)
@@ -244,14 +246,15 @@ def bbox2ranges(bbox, rasterdensity):
 
 
 def loadregions(regionname):
-    with h5py.File(in_datafolder(f"regions_{regionname}.jld"), "r") as file:
-        return (
-            file["regions"][:],
-            file["offshoreregions"][:],
-            file["regionlist"][:],
-            file["lonrange"][:],
-            file["latrange"][:],
-        )
+    file = h5py.File(in_datafolder(f"regions_{regionname}.jld"), "r")
+    vals = (
+        file["regions"],
+        file["offshoreregions"],
+        file["regionlist"],
+        file["lonrange"],
+        file["latrange"],
+    )
+    return vals
 
 
 def getbboxranges(regions, padding=0):
@@ -282,10 +285,10 @@ def makeregions(regiondefinitionarray, allowmixed=False):
     region = np.zeros((36000, 18000), dtype=np.int16)
     if use_nuts:
         nuts, subregionnames = read_nuts()
-        makeregions_nuts(region, nuts, subregionnames, nutsdef)
+        region = makeregions_nuts(region, nuts, subregionnames, nutsdef)
     if use_gadm:
         gadm, subregionnames = read_gadm()
-        makeregions_gadm(region, gadm, subregionnames, gadmdef)
+        region = makeregions_gadm(region, gadm, subregionnames, gadmdef)
     return region, regiontype
 
 
@@ -295,13 +298,18 @@ def makeregions_gadm(region, gadm, subregionnames, regiondefinitions):
     rows, cols = region.shape
     for c in tqdm(np.random.permutation(cols)):
         for r in range(rows):
-            gadm_uid = gadm[r, c]
-            if gadm_uid == 0 or gadm_uid == 78413 or region[r, c] > 0:
-                continue
-            reg0, reg1, reg2 = subregionnames[gadm_uid]
-            regid = lookup_regionnames(regionlookup, reg0, reg1, reg2)
-            if regid > 0:
-                region[r, c] = regid
+            try:
+                gadm_uid = gadm[c][r]
+                if gadm_uid == 0 or gadm_uid == 78413 or region[r][c] > 0:
+                    continue
+                reg0, reg1, reg2 = subregionnames[gadm_uid - 1]
+                regid = lookup_regionnames(regionlookup, reg0, reg1, reg2)
+                if regid > 0:
+                    region[r][c] = regid
+            except Exception as _e:
+                print(f"DEBUG: r={r} c={c}")
+                print(f"DEBUG: _e={_e}")
+    return region
 
 
 def lookup_regionnames(regionlookup, reg0, reg1, reg2):
@@ -333,7 +341,7 @@ def saveregions(
     autocrop=True,
     bbox=np.array([[-90, -180], [90, 180]]),
 ):
-    land = loadmat(in_datafolder("landcover.mat"))["landcover"]
+    land = h5py.File(in_datafolder("landcover.jld"), "r")["landcover"]
     if not np.all(bbox == np.array([[-90, -180], [90, 180]])):
         autocrop = False  # ignore supplied autocrop option if user changed bbox
     _saveregions(regionname, regiondefinitionarray, land, autocrop, bbox)
@@ -346,11 +354,15 @@ def _saveregions(regionname, regiondefinitionarray, landcover, autocrop, bbox):
     if autocrop:
         # get indexes of the bounding box containing onshore region data with 6% of padding
         lonrange, latrange = getbboxranges(regions)
-        padding = int(np.amax(regions[lonrange, latrange].shape) * 0.06)
+        breakpoint()
+        padding = int(
+            np.amax(regions[lonrange, :][:, [x for x in latrange]].shape) * 0.06
+        )
+        # IndexError: shape mismatch: indexing arrays could not be broadcast together with shapes (8886,) (7237,)↲
         lonrange, latrange = getbboxranges(regions, padding)
     else:
         latrange, lonrange = bbox2ranges(roundbbox(bbox, 100), 100)
-    landcover = landcover[lonrange, latrange]
+    landcover = landcover[[x for x in latrange], :][:, lonrange]
     regions = regions[lonrange, latrange]
     if regionname != "Global_GADM0" and regionname != "Europe_background":
         if regiontype == "NUTS":
@@ -363,7 +375,9 @@ def _saveregions(regionname, regiondefinitionarray, landcover, autocrop, bbox):
             print(
                 "\nGADM region definitions detected (using Global_GADM0 region file)..."
             )
-            globalregions = loadregions("Global_GADM0")[0][lonrange, latrange]
+            globalregions = loadregions("Global_GADM0")[0][[x for x in latrange], :][
+                :, lonrange
+            ]
             regions[(regions == 0) & (globalregions > 0)] = NOREGION
     print("\nAllocate non-region pixels to the nearest region (for offshore wind)...")
     territory = regions[feature_transform(regions > 0)]
@@ -373,17 +387,17 @@ def _saveregions(regionname, regiondefinitionarray, landcover, autocrop, bbox):
     print("\nSaving regions and offshoreregions...")
     regionlist = [str(x) for x in regiondefinitionarray[:, 0]]
     # TODO
-    # jld2.save(
-    # in_datafolder(f"regions_{regionname}.jld"),
-    # "regions",
-    # regions,
-    # "offshoreregions",
-    # offshoreregions,
-    # "regionlist",
-    # regionlist,
-    # "lonrange",
-    # lonrange,
-    # "latrange",
-    # latrange,
-    # compress=True,
-    # )
+    jld2.save(
+        in_datafolder(f"regions_{regionname}.jld"),
+        "regions",
+        regions,
+        "offshoreregions",
+        offshoreregions,
+        "regionlist",
+        regionlist,
+        "lonrange",
+        lonrange,
+        "latrange",
+        latrange,
+        compress=True,
+    )

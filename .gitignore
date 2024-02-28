@@ -1,2 +1,5 @@
-
+.GlobalEnergyGIS_config
+GISdata/
+globalgis.zip
+runtime/
 deps/build.log

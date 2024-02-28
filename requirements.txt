@@ -1,4 +1,5 @@
 h5py
+hdf5plugin
 # jld2
 numpy
 pandas
